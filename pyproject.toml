@@ -1,0 +1,46 @@
+[project]
+name = "shell-pilot"
+version = "0.1.0"
+description = "A more ergonomic subprocess alternative with bash-like pipe syntax"
+readme = "README.md"
+license = "MIT"
+authors = [
+    { name = "Nick Rogers", email = "nick.rogers@wagestream.co.uk" }
+]
+requires-python = ">=3.9"
+dependencies = []
+keywords = ["subprocess", "shell", "pipe", "bash", "command", "process"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Shells",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://github.com/nickrogers/shell-pilot"
+Repository = "https://github.com/nickrogers/shell-pilot"
+Issues = "https://github.com/nickrogers/shell-pilot/issues"
+
+[build-system]
+requires = ["uv_build>=0.9.8,<0.10.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
