@@ -1,6 +1,6 @@
 [project]
 name = "shell-pilot"
-version = "0.1.1"
+version = "0.1.2"
 description = "A more ergonomic subprocess alternative with bash-like pipe syntax"
 readme = "README.md"
 license = "MIT"

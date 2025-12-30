@@ -32,17 +32,15 @@ pip install shell-pilot
 ### Basic Commands
 
 ```python
-from shell_pilot import cmd, sh, run
+from shell_pilot import sh
 
-# Simple command execution
-result = cmd("echo", "hello", "world").run()
+# Simple command
+result = sh("echo hello world").run()
 print(result.stdout)  # "hello world\n"
 
-# Shell-style string parsing (auto-splits on spaces)
-result = sh("ls -la").run()
-
-# Quick one-liner
-output = run("uname -s").stdout
+# Check success
+if result.ok:
+    print("Command succeeded")
 ```
 
 ### Piping with `|`
@@ -63,66 +61,54 @@ result = (
 print(f"Python processes: {result.stdout.strip()}")
 ```
 
-### Handling Input/Output
+### Stdin, Environment & Working Directory
 
 ```python
-# Pass stdin to a command
-result = cmd("cat").with_stdin("hello from stdin").run()
+# Pass stdin
+result = sh("cat").with_stdin("hello from stdin").run()
 
-# Check if command succeeded
-if result.ok:
-    print(result.stdout)
-else:
-    print(f"Error: {result.stderr}")
-
-# Use result as boolean
-if run("which python3"):
-    print("Python 3 is installed")
-```
-
-### Environment Variables & Working Directory
-
-```python
 # Set environment variables
-result = (
-    cmd("sh", "-c", "echo $GREETING $NAME")
-    .with_env(GREETING="Hello", NAME="World")
-    .run()
-)
+result = sh("echo $GREETING").with_env(GREETING="Hello").run()
 
 # Change working directory
-result = cmd("ls").with_cwd("/tmp").run()
+result = sh("ls").with_cwd("/tmp").run()
+
+# Chain them
+result = (
+    sh("my-script")
+    .with_stdin(input_data)
+    .with_env(DEBUG="1")
+    .with_cwd("/app")
+    .run()
+)
 ```
 
 ### Error Handling
 
 ```python
-from shell_pilot import cmd, CommandError
+from shell_pilot import sh, CommandError
 
-# Option 1: Check the result
-result = cmd("might-fail").run()
+# Check the result
+result = sh("might-fail").run()
 if not result.ok:
-    print(f"Failed with code {result.returncode}: {result.stderr}")
+    print(f"Failed: {result.stderr}")
 
-# Option 2: Raise on failure
+# Or raise on failure
 try:
-    result = cmd("must-succeed").run(check=True)
+    result = sh("must-succeed").run(check=True)
 except CommandError as e:
     print(f"Command failed: {e.result.stderr}")
-
-# Option 3: Chain raise_on_error()
-result = cmd("risky-command").run().raise_on_error()
 ```
 
 ### Async Support
 
 ```python
 import asyncio
-from shell_pilot import cmd, sh, run_async
+from shell_pilot import sh
 
 async def main():
     # Single async command
-    result = await cmd("sleep 1 && echo done").run_async()
+    result = await sh("echo async").run_async()
 
     # Async pipeline
     result = await (
@@ -131,77 +117,30 @@ async def main():
         | sh("sort -u")
     ).run_async()
 
-    # Quick async one-liner
-    result = await run_async("curl -s https://api.example.com")
-
 asyncio.run(main())
-```
-
-### Fluent API
-
-All configuration methods return new instances, allowing fluent chaining:
-
-```python
-result = (
-    cmd("my-script")
-    .with_stdin(input_data)
-    .with_env(DEBUG="1", LOG_LEVEL="info")
-    .with_cwd("/app")
-    .run(check=True)
-)
 ```
 
 ## API Reference
 
-### `Cmd` / `cmd` / `sh`
+### `sh(command, stdin=None, env=None, cwd=None)`
 
-The main class for building commands. `cmd` and `sh` are convenient aliases.
-
-```python
-Cmd(*args, stdin=None, env=None, cwd=None)
-```
+Create a command. Strings are automatically parsed (e.g., `"ls -la"` becomes `["ls", "-la"]`).
 
 **Methods:**
-- `.run(check=False)` - Execute synchronously, return `Result`
-- `.run_async(check=False)` - Execute asynchronously, return `Result`
-- `.with_stdin(text)` - Return new Cmd with stdin
-- `.with_env(**vars)` - Return new Cmd with additional env vars
-- `.with_cwd(path)` - Return new Cmd with working directory
-- `|` operator - Pipe to another command
+- `.run(check=False)` - Execute synchronously
+- `.run_async(check=False)` - Execute asynchronously
+- `.with_stdin(text)` - Set stdin input
+- `.with_env(**vars)` - Add environment variables
+- `.with_cwd(path)` - Set working directory
+- `|` - Pipe to another command
 
 ### `Result`
-
-Returned by `.run()` and `.run_async()`.
 
 **Attributes:**
 - `.stdout` - Standard output as string
 - `.stderr` - Standard error as string
 - `.returncode` - Exit code
 - `.ok` - `True` if returncode is 0
-
-**Methods:**
-- `.raise_on_error()` - Raise `CommandError` if failed, otherwise return self
-- `bool(result)` - Returns `.ok`
-- `str(result)` - Returns `.stdout`
-
-### `CommandError`
-
-Exception raised when a command fails (with `check=True`).
-
-```python
-try:
-    cmd("failing-command").run(check=True)
-except CommandError as e:
-    print(e.result.stderr)
-    print(e.result.returncode)
-```
-
-### Convenience Functions
-
-```python
-run(command, **kwargs) -> Result      # Quick sync execution
-run_async(command, **kwargs) -> Result  # Quick async execution
-```
 
 ## License
 
