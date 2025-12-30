@@ -17,8 +17,8 @@ p2.stdout.close()
 output = p3.communicate()[0]
 
 # shell-pilot (the joy)
-from shell_pilot import sh
-result = (sh("ls -la") | sh("grep foo") | sh("wc -l")).run()
+from shell_pilot import cmd
+result = (cmd("ls -la") | cmd("grep foo") | cmd("wc -l")).run()
 ```
 
 ## Installation
@@ -32,10 +32,10 @@ pip install shell-pilot
 ### Basic Commands
 
 ```python
-from shell_pilot import sh
+from shell_pilot import cmd
 
 # Simple command
-result = sh("echo hello world").run()
+result = cmd("echo hello world").run()
 print(result.stdout)  # "hello world\n"
 
 # Check success
@@ -49,14 +49,14 @@ Chain commands together just like in bash:
 
 ```python
 # Two-stage pipe
-result = (sh("cat /etc/hosts") | sh("grep localhost")).run()
+result = (cmd("cat /etc/hosts") | cmd("grep localhost")).run()
 
 # Multi-stage pipe
 result = (
-    sh("ps aux")
-    | sh("grep python")
-    | sh("grep -v grep")
-    | sh("wc -l")
+    cmd("ps aux")
+    | cmd("grep python")
+    | cmd("grep -v grep")
+    | cmd("wc -l")
 ).run()
 print(f"Python processes: {result.stdout.strip()}")
 ```
@@ -65,56 +65,64 @@ print(f"Python processes: {result.stdout.strip()}")
 
 ```python
 # Pass stdin
-result = sh("cat").with_stdin("hello from stdin").run()
+result = cmd("cat").with_stdin("hello from stdin").run()
 
 # Set environment variables
-result = sh("echo $GREETING").with_env(GREETING="Hello").run()
+result = cmd("echo $GREETING").with_env(GREETING="Hello").run()
 
 # Change working directory
-result = sh("ls").with_cwd("/tmp").run()
+result = cmd("ls").with_cwd("/tmp").run()
+```
 
-# Chain them
+### Fluent API
+
+All configuration methods return new instances, allowing fluent chaining:
+
+```python
 result = (
-    sh("my-script")
+    cmd("my-script")
     .with_stdin(input_data)
-    .with_env(DEBUG="1")
+    .with_env(DEBUG="1", LOG_LEVEL="info")
     .with_cwd("/app")
-    .run()
+    .run(check=True)
 )
 ```
 
 ### Error Handling
 
 ```python
-from shell_pilot import sh, CommandError
+from shell_pilot import cmd, CommandError
 
-# Check the result
-result = sh("might-fail").run()
+# Option 1: Check the result
+result = cmd("might-fail").run()
 if not result.ok:
-    print(f"Failed: {result.stderr}")
+    print(f"Failed with code {result.returncode}: {result.stderr}")
 
-# Or raise on failure
+# Option 2: Raise on failure
 try:
-    result = sh("must-succeed").run(check=True)
+    result = cmd("must-succeed").run(check=True)
 except CommandError as e:
     print(f"Command failed: {e.result.stderr}")
+
+# Option 3: Chain raise_on_error()
+result = cmd("risky-command").run().raise_on_error()
 ```
 
 ### Async Support
 
 ```python
 import asyncio
-from shell_pilot import sh
+from shell_pilot import cmd
 
 async def main():
     # Single async command
-    result = await sh("echo async").run_async()
+    result = await cmd("echo async").run_async()
 
     # Async pipeline
     result = await (
-        sh("cat largefile.txt")
-        | sh("grep pattern")
-        | sh("sort -u")
+        cmd("cat largefile.txt")
+        | cmd("grep pattern")
+        | cmd("sort -u")
     ).run_async()
 
 asyncio.run(main())
@@ -122,7 +130,7 @@ asyncio.run(main())
 
 ## API Reference
 
-### `sh(command, stdin=None, env=None, cwd=None)`
+### `cmd(command, stdin=None, env=None, cwd=None)`
 
 Create a command. Strings are automatically parsed (e.g., `"ls -la"` becomes `["ls", "-la"]`).
 
@@ -132,6 +140,7 @@ Create a command. Strings are automatically parsed (e.g., `"ls -la"` becomes `["
 - `.with_stdin(text)` - Set stdin input
 - `.with_env(**vars)` - Add environment variables
 - `.with_cwd(path)` - Set working directory
+- `.raise_on_error()` - Raise `CommandError` if failed
 - `|` - Pipe to another command
 
 ### `Result`
@@ -141,6 +150,15 @@ Create a command. Strings are automatically parsed (e.g., `"ls -la"` becomes `["
 - `.stderr` - Standard error as string
 - `.returncode` - Exit code
 - `.ok` - `True` if returncode is 0
+
+### Convenience Functions
+
+```python
+from shell_pilot import run, run_async
+
+result = run("ls -la")                # Quick sync execution
+result = await run_async("ls -la")    # Quick async execution
+```
 
 ## License
 
