@@ -27,9 +27,9 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/nickrogers/shell-pilot"
-Repository = "https://github.com/nickrogers/shell-pilot"
-Issues = "https://github.com/nickrogers/shell-pilot/issues"
+Homepage = "https://github.com/rogersnm/shell-pilot"
+Repository = "https://github.com/rogersnm/shell-pilot"
+Issues = "https://github.com/rogersnm/shell-pilot/issues"
 
 [build-system]
 requires = ["uv_build>=0.9.8,<0.10.0"]
