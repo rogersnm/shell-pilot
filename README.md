@@ -27,6 +27,11 @@ result = (cmd("ls -la") | cmd("grep foo") | cmd("wc -l")).run()
 pip install shell-pilot
 ```
 
+```python
+# Note: Import uses underscore (Python convention)
+from shell_pilot import cmd
+```
+
 ## Usage
 
 ### Basic Commands
@@ -88,6 +93,70 @@ result = (
 )
 ```
 
+### Timeouts
+
+Prevent commands from hanging indefinitely:
+
+```python
+from shell_pilot import cmd, TimeoutExpired
+
+try:
+    result = cmd("long-running-command").run(timeout=30.0)
+except TimeoutExpired as e:
+    print(f"Command timed out after {e.timeout}s")
+
+# Also works with pipelines and async
+result = (cmd("producer") | cmd("consumer")).run(timeout=10.0)
+result = await cmd("async-command").run_async(timeout=5.0)
+```
+
+### Shell Mode
+
+Use shell features like glob expansion and environment variable substitution:
+
+```python
+# Glob expansion
+result = cmd("ls *.py", shell=True).run()
+
+# Environment variable expansion
+result = cmd("echo $HOME", shell=True).run()
+
+# Shell operators
+result = cmd("cmd1 && cmd2 || cmd3", shell=True).run()
+```
+
+> **Security Warning:** Using `shell=True` with untrusted input creates command injection vulnerabilities. Never pass user-provided strings directly to shell mode. For pipelines, prefer the `|` operator which is both safer and more Pythonic.
+
+### Streaming
+
+Process output incrementally without loading everything into memory:
+
+```python
+# Line-by-line streaming
+with cmd("tail -f /var/log/syslog").stream() as s:
+    for line in s.iter_lines():
+        print(f"Got: {line}")
+        if "error" in line:
+            break  # Process terminates automatically
+
+# Byte-level streaming
+with cmd("cat /dev/urandom").stream() as s:
+    for chunk in s.iter_bytes(chunk_size=4096):
+        process_binary(chunk)
+        if done:
+            break
+
+# Pipeline streaming
+with (cmd("producer") | cmd("filter")).stream() as s:
+    for line in s.iter_lines():
+        handle(line)
+
+# Async streaming
+async with await cmd("async-producer").stream_async() as s:
+    async for line in s.iter_lines():
+        await handle(line)
+```
+
 ### Error Handling
 
 ```python
@@ -118,29 +187,33 @@ async def main():
     # Single async command
     result = await cmd("echo async").run_async()
 
-    # Async pipeline
+    # Async pipeline (runs concurrently!)
     result = await (
         cmd("cat largefile.txt")
         | cmd("grep pattern")
         | cmd("sort -u")
     ).run_async()
 
+    # With timeout
+    result = await cmd("slow-command").run_async(timeout=10.0)
+
 asyncio.run(main())
 ```
 
 ## API Reference
 
-### `cmd(command, stdin=None, env=None, cwd=None)`
+### `cmd(command, stdin=None, env=None, cwd=None, shell=False)`
 
 Create a command. Strings are automatically parsed (e.g., `"ls -la"` becomes `["ls", "-la"]`).
 
 **Methods:**
-- `.run(check=False)` - Execute synchronously
-- `.run_async(check=False)` - Execute asynchronously
+- `.run(check=False, timeout=None)` - Execute synchronously
+- `.run_async(check=False, timeout=None)` - Execute asynchronously
+- `.stream()` - Start command and return Stream for incremental reading
+- `.stream_async()` - Start command and return AsyncStream
 - `.with_stdin(text)` - Set stdin input
 - `.with_env(**vars)` - Add environment variables
 - `.with_cwd(path)` - Set working directory
-- `.raise_on_error()` - Raise `CommandError` if failed
 - `|` - Pipe to another command
 
 ### `Result`
@@ -150,6 +223,31 @@ Create a command. Strings are automatically parsed (e.g., `"ls -la"` becomes `["
 - `.stderr` - Standard error as string
 - `.returncode` - Exit code
 - `.ok` - `True` if returncode is 0
+
+**Methods:**
+- `.raise_on_error()` - Raise `CommandError` if failed, returns self for chaining
+- `bool(result)` - Returns `.ok`
+- `str(result)` - Returns `.stdout`
+
+### `Stream` / `AsyncStream`
+
+**Properties:**
+- `.stdout` - Raw stdout file object (for select/poll)
+- `.stderr` - Raw stderr file object
+- `.pid` - PID of last process in pipeline
+- `.returncodes` - List of return codes (None if still running)
+
+**Methods:**
+- `.iter_bytes(chunk_size=8192)` - Iterate over byte chunks
+- `.iter_lines(encoding="utf-8")` - Iterate over lines
+- `.read_all(timeout=None)` - Read remaining output as Result
+- `.kill()` / `.terminate()` - Signal all processes
+- `.close()` - Clean up resources
+
+### Exceptions
+
+- `CommandError` - Raised when command fails (with `check=True`)
+- `TimeoutExpired` - Raised when command exceeds timeout
 
 ### Convenience Functions
 
