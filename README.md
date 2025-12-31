@@ -1,6 +1,6 @@
 # shell-pilot
 
-A more ergonomic subprocess alternative for Python with bash-like pipe syntax.
+A more ergonomic subprocess alternative for Python with bash-like pipe syntax and zero dependencies.
 
 ## Why?
 
@@ -25,11 +25,6 @@ result = (cmd("ls -la") | cmd("grep foo") | cmd("wc -l")).run()
 
 ```bash
 pip install shell-pilot
-```
-
-```python
-# Note: Import uses underscore (Python convention)
-from shell_pilot import cmd
 ```
 
 ## Usage
