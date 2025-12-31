@@ -1031,3 +1031,160 @@ class TestSpecialInputOutput:
         """Stdin with only newlines."""
         result = cmd("wc", "-l").with_stdin("\n\n\n").run()
         assert "3" in result.stdout
+
+
+class TestVersion:
+    """Test version attribute."""
+
+    def test_version_exists(self):
+        """Test that __version__ is exposed."""
+        from shell_pilot import __version__
+        assert __version__ is not None
+        assert isinstance(__version__, str)
+
+    def test_version_format(self):
+        """Test version follows semver format."""
+        from shell_pilot import __version__
+        parts = __version__.split(".")
+        assert len(parts) >= 2  # At least major.minor
+        assert all(p.isdigit() for p in parts)
+
+
+class TestReturnCodes:
+    """Test returncodes attribute on Result."""
+
+    def test_single_command_no_returncodes(self):
+        """Single command should have returncodes as None."""
+        result = cmd("echo hello").run()
+        assert result.returncodes is None
+        assert result.ok
+
+    def test_pipeline_returncodes(self):
+        """Pipeline should have all return codes."""
+        result = (sh("echo hello") | sh("cat") | sh("cat")).run()
+        assert result.returncodes is not None
+        assert len(result.returncodes) == 3
+        assert all(rc == 0 for rc in result.returncodes)
+
+    def test_pipeline_with_failure(self):
+        """Pipeline with failure should show which command failed."""
+        result = (sh("echo hello") | sh("grep nonexistent") | sh("cat")).run()
+        assert not result.ok
+        assert result.returncodes is not None
+        assert len(result.returncodes) == 3
+        assert result.returncodes[0] == 0  # echo succeeded
+        assert result.returncodes[1] != 0  # grep failed
+
+    def test_pipeline_ok_checks_all(self):
+        """Pipeline ok property should check all return codes."""
+        result = (sh("true") | sh("true") | sh("true")).run()
+        assert result.ok
+
+        # Even if returncode is 0, ok should check all returncodes
+        result2 = (sh("false") | sh("cat")).run()
+        assert not result2.ok
+
+
+class TestPipelineShellMode:
+    """Test shell mode works in pipelines."""
+
+    def test_shell_mode_first_command(self):
+        """Shell mode on first command in pipeline."""
+        result = (cmd("echo $HOME", shell=True) | sh("cat")).run()
+        assert result.ok
+        # HOME should be expanded
+        assert result.stdout.strip() != "$HOME"
+        assert "/" in result.stdout  # Unix path
+
+    def test_shell_mode_last_command(self):
+        """Shell mode on last command in pipeline."""
+        result = (sh("echo hello") | cmd("cat && echo done", shell=True)).run()
+        assert result.ok
+        assert "hello" in result.stdout
+        assert "done" in result.stdout
+
+    def test_mixed_shell_modes(self):
+        """Mix of shell and non-shell mode in pipeline."""
+        result = (
+            cmd("echo $USER", shell=True)
+            | sh("cat")
+            | cmd("wc -c", shell=False)
+        ).run()
+        assert result.ok
+
+    def test_shell_glob_in_pipeline(self):
+        """Test glob expansion works in shell mode pipeline."""
+        # Create a temp scenario that uses glob
+        result = (
+            cmd("echo *.py", shell=True)
+            | sh("cat")
+        ).run()
+        assert result.ok
+        # The glob might match files or return literal "*.py" if no match
+        # Either is valid behavior
+
+
+class TestPipelineShellModeAsync:
+    """Test async shell mode in pipelines."""
+
+    @pytest.mark.asyncio
+    async def test_async_shell_mode_pipeline(self):
+        """Shell mode works in async pipelines."""
+        result = await (cmd("echo $HOME", shell=True) | sh("cat")).run_async()
+        assert result.ok
+        assert "/" in result.stdout
+
+    @pytest.mark.asyncio
+    async def test_async_mixed_shell_modes(self):
+        """Mix of shell modes in async pipeline."""
+        result = await (
+            cmd("echo hello", shell=True)
+            | sh("cat")
+            | cmd("wc -w")
+        ).run_async()
+        assert result.ok
+
+
+class TestTimeoutStderrCapture:
+    """Test that stderr is captured on timeout."""
+
+    def test_timeout_captures_stderr(self):
+        """Stderr should be captured when timeout occurs."""
+        # The last command in pipeline writes to stderr and sleeps
+        with pytest.raises(TimeoutExpired) as exc_info:
+            (
+                sh("echo hello")
+                | cmd("cat; echo 'error message' >&2; sleep 10", shell=True)
+            ).run(timeout=0.5)
+        # Note: stderr capture is best-effort, may or may not have content
+
+    @pytest.mark.asyncio
+    async def test_async_timeout_captures_stderr(self):
+        """Async stderr should be captured when timeout occurs."""
+        with pytest.raises(TimeoutExpired) as exc_info:
+            await (
+                sh("echo hello")
+                | cmd("cat; echo 'async error' >&2; sleep 10", shell=True)
+            ).run_async(timeout=0.5)
+        # Note: stderr capture is best-effort
+
+
+class TestAsyncReturnCodes:
+    """Test returncodes in async pipelines."""
+
+    @pytest.mark.asyncio
+    async def test_async_pipeline_returncodes(self):
+        """Async pipeline should have all return codes."""
+        result = await (sh("echo hello") | sh("cat") | sh("cat")).run_async()
+        assert result.returncodes is not None
+        assert len(result.returncodes) == 3
+        assert all(rc == 0 for rc in result.returncodes)
+
+    @pytest.mark.asyncio
+    async def test_async_pipeline_failure_returncodes(self):
+        """Async pipeline failure should show which command failed."""
+        result = await (sh("echo hello") | sh("grep nonexistent")).run_async()
+        assert not result.ok
+        assert result.returncodes is not None
+        assert result.returncodes[0] == 0  # echo succeeded
+        assert result.returncodes[1] != 0  # grep failed

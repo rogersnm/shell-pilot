@@ -33,6 +33,8 @@ import threading
 from dataclasses import dataclass
 from typing import Union, Optional, Iterator, AsyncIterator, IO
 
+__version__ = "0.3.0"
+
 __all__ = [
     "Cmd",
     "cmd",
@@ -44,6 +46,7 @@ __all__ = [
     "AsyncStream",
     "run",
     "run_async",
+    "__version__",
 ]
 
 
@@ -53,10 +56,13 @@ class Result:
     stdout: str
     stderr: str
     returncode: int
+    returncodes: Optional[list] = None  # All return codes for pipelines
 
     @property
     def ok(self) -> bool:
-        """True if command exited with code 0."""
+        """True if all commands exited with code 0."""
+        if self.returncodes is not None:
+            return all(rc == 0 for rc in self.returncodes)
         return self.returncode == 0
 
     def __bool__(self) -> bool:
@@ -235,58 +241,7 @@ class Cmd:
 
     def _run_pipeline(self, check: bool = False, timeout: Optional[float] = None) -> Result:
         """Run pipeline with true Unix pipe semantics."""
-        import os
-
-        processes: list[subprocess.Popen] = []
-
-        for i, pipe_cmd in enumerate(self._pipeline):
-            is_first = i == 0
-            is_last = i == len(self._pipeline) - 1
-
-            # Connect stdin to previous process's stdout (the OS pipe)
-            stdin_source = None
-            if is_first:
-                stdin_source = subprocess.PIPE if pipe_cmd._stdin else None
-            else:
-                stdin_source = processes[-1].stdout  # OS file descriptor!
-
-            env = None
-            if pipe_cmd._env:
-                env = {**os.environ, **pipe_cmd._env}
-
-            proc = subprocess.Popen(
-                pipe_cmd._args,
-                stdin=stdin_source,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE if is_last else subprocess.DEVNULL,
-                text=True,
-                env=env,
-                cwd=pipe_cmd._cwd,
-            )
-            processes.append(proc)
-
-            # CRITICAL: Close our copy of the write end of the pipe
-            # This allows SIGPIPE to propagate when downstream exits
-            if not is_first and processes[-2].stdout:
-                processes[-2].stdout.close()
-
-        # Feed stdin to first process in separate thread to avoid deadlock
-        stdin_thread = None
-        stdin_exception = None
-
-        if self._pipeline[0]._stdin and processes:
-            def feed_stdin():
-                nonlocal stdin_exception
-                try:
-                    processes[0].stdin.write(self._pipeline[0]._stdin)
-                    processes[0].stdin.close()
-                except BrokenPipeError:
-                    pass  # Process exited early, that's OK
-                except Exception as e:
-                    stdin_exception = e
-
-            stdin_thread = threading.Thread(target=feed_stdin, daemon=True)
-            stdin_thread.start()
+        processes, stdin_thread = self._start_pipeline(text=True)
 
         # Read from last process with timeout
         last_proc = processes[-1]
@@ -299,6 +254,15 @@ class Cmd:
                     proc.kill()
                 except OSError:
                     pass
+
+            # Try to capture any stderr that was produced
+            captured_stderr = ""
+            try:
+                if last_proc.stderr:
+                    captured_stderr = last_proc.stderr.read() or ""
+            except Exception:
+                pass
+
             # Wait for them to actually die
             for proc in processes:
                 try:
@@ -308,14 +272,12 @@ class Cmd:
             raise TimeoutExpired(
                 [c._args for c in self._pipeline],
                 timeout,
-                stderr=""
+                stderr=captured_stderr
             )
 
         # Wait for stdin thread to complete
         if stdin_thread:
             stdin_thread.join(timeout=1)
-            if stdin_exception:
-                raise stdin_exception
 
         # Wait for all processes and collect return codes
         return_codes = []
@@ -334,6 +296,7 @@ class Cmd:
             stdout=stdout,
             stderr=stderr,
             returncode=final_returncode,
+            returncodes=return_codes,
         )
 
         if check and not result.ok:
@@ -399,79 +362,7 @@ class Cmd:
 
     async def _run_pipeline_async(self, check: bool = False, timeout: Optional[float] = None) -> Result:
         """Run pipeline with true concurrent async pipes."""
-        import os
-
-        processes: list[asyncio.subprocess.Process] = []
-
-        for i, pipe_cmd in enumerate(self._pipeline):
-            is_first = i == 0
-            is_last = i == len(self._pipeline) - 1
-
-            env = {**os.environ, **(pipe_cmd._env or {})} if pipe_cmd._env else None
-
-            # For non-first processes, we need to connect to previous stdout
-            # asyncio doesn't support passing StreamReader directly, so we
-            # use a pipe and shuttle data
-            if is_first:
-                stdin = asyncio.subprocess.PIPE if pipe_cmd._stdin else None
-            else:
-                stdin = asyncio.subprocess.PIPE  # We'll feed it manually
-
-            proc = await asyncio.create_subprocess_exec(
-                *pipe_cmd._args,
-                stdin=stdin,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE if is_last else asyncio.subprocess.DEVNULL,
-                env=env,
-                cwd=pipe_cmd._cwd,
-            )
-            processes.append(proc)
-
-        # Create tasks to shuttle data between processes
-        async def pipe_data(src: asyncio.StreamReader, dst: asyncio.StreamWriter):
-            """Copy data from src to dst until EOF."""
-            try:
-                while True:
-                    chunk = await src.read(8192)
-                    if not chunk:
-                        break
-                    dst.write(chunk)
-                    await dst.drain()
-            except (BrokenPipeError, ConnectionResetError, OSError):
-                pass  # Downstream closed, that's fine
-            finally:
-                try:
-                    dst.close()
-                    await dst.wait_closed()
-                except Exception:
-                    pass  # Best effort cleanup
-
-        # Set up data flow tasks
-        shuttle_tasks = []
-
-        # Feed initial stdin
-        async def feed_first_stdin():
-            try:
-                data = self._pipeline[0]._stdin
-                if isinstance(data, str):
-                    data = data.encode()
-                processes[0].stdin.write(data)
-                await processes[0].stdin.drain()
-                processes[0].stdin.close()
-                await processes[0].stdin.wait_closed()
-            except (BrokenPipeError, ConnectionResetError, OSError):
-                pass
-            except Exception:
-                pass
-
-        if self._pipeline[0]._stdin:
-            shuttle_tasks.append(asyncio.create_task(feed_first_stdin()))
-
-        # Connect intermediate processes
-        for i in range(len(processes) - 1):
-            shuttle_tasks.append(asyncio.create_task(
-                pipe_data(processes[i].stdout, processes[i + 1].stdin)
-            ))
+        processes, shuttle_tasks = await self._start_pipeline_async()
 
         # Helper to collect final output
         final_stdout = None
@@ -502,6 +393,20 @@ class Cmd:
                             proc.kill()
                         except OSError:
                             pass
+
+                    # Try to capture any stderr that was produced
+                    captured_stderr = ""
+                    try:
+                        last_proc = processes[-1]
+                        if last_proc.stderr:
+                            stderr_bytes = await asyncio.wait_for(
+                                last_proc.stderr.read(),
+                                timeout=0.5
+                            )
+                            captured_stderr = stderr_bytes.decode(errors="replace") if stderr_bytes else ""
+                    except Exception:
+                        pass
+
                     # Wait for processes to die
                     for proc in processes:
                         try:
@@ -510,7 +415,8 @@ class Cmd:
                             pass
                     raise TimeoutExpired(
                         [c._args for c in self._pipeline],
-                        timeout
+                        timeout,
+                        stderr=captured_stderr
                     )
             else:
                 # No timeout - wait for all tasks
@@ -535,17 +441,21 @@ class Cmd:
         for proc in processes:
             await proc.wait()
 
+        # Collect all return codes
+        return_codes = [proc.returncode for proc in processes]
+
         # Pipefail: first non-zero exit code
         final_returncode = 0
-        for proc in processes:
-            if proc.returncode != 0:
-                final_returncode = proc.returncode
+        for rc in return_codes:
+            if rc != 0:
+                final_returncode = rc
                 break
 
         result = Result(
             stdout=final_stdout.decode() if final_stdout else "",
             stderr=final_stderr.decode() if final_stderr else "",
             returncode=final_returncode,
+            returncodes=return_codes,
         )
 
         if check and not result.ok:
@@ -557,81 +467,72 @@ class Cmd:
         """Return a new Cmd/pipeline with the given stdin for the first command."""
         if len(self._pipeline) == 1:
             # Single command - set stdin directly
-            new_cmd = Cmd(*self._args, stdin=stdin, env=self._env, cwd=self._cwd, shell=self._shell)
-            new_cmd._pipeline = [new_cmd]
-            return new_cmd
+            return Cmd(*self._args, stdin=stdin, env=self._env, cwd=self._cwd, shell=self._shell)
         else:
-            # Pipeline - need to update the first command in the pipeline
+            # Pipeline - clone with updated first command's stdin
             result = Cmd.__new__(Cmd)
-            result._args = self._args
-            result._stdin = self._stdin
-            result._env = self._env
-            result._cwd = self._cwd
-            result._shell = self._shell
+            result._args = self._pipeline[-1]._args
+            result._stdin = self._pipeline[-1]._stdin
+            result._env = self._pipeline[-1]._env
+            result._cwd = self._pipeline[-1]._cwd
+            result._shell = self._pipeline[-1]._shell
 
-            # Create a new first command with the stdin
-            first_cmd = self._pipeline[0]
-            new_first = Cmd(*first_cmd._args, stdin=stdin, env=first_cmd._env, cwd=first_cmd._cwd, shell=first_cmd._shell)
-            new_first._pipeline = [new_first]
-
-            # Rebuild pipeline with new first command
-            result._pipeline = [new_first] + [
+            # Rebuild pipeline: first command gets new stdin, rest are cloned
+            first = self._pipeline[0]
+            result._pipeline = [
+                Cmd(*first._args, stdin=stdin, env=first._env, cwd=first._cwd, shell=first._shell)
+            ] + [
                 Cmd(*c._args, stdin=c._stdin, env=c._env, cwd=c._cwd, shell=c._shell)
                 for c in self._pipeline[1:]
             ]
-            # Fix pipeline references for intermediate commands
-            for c in result._pipeline[1:]:
-                c._pipeline = [c]
             return result
 
     def with_env(self, **env: str) -> "Cmd":
         """Return a new Cmd/pipeline with additional environment variables for ALL commands."""
         if len(self._pipeline) == 1:
             merged_env = {**(self._env or {}), **env}
-            new_cmd = Cmd(*self._args, stdin=self._stdin, env=merged_env, cwd=self._cwd, shell=self._shell)
-            new_cmd._pipeline = [new_cmd]
-            return new_cmd
+            return Cmd(*self._args, stdin=self._stdin, env=merged_env, cwd=self._cwd, shell=self._shell)
         else:
             # Pipeline - apply env to ALL commands
             result = Cmd.__new__(Cmd)
-            result._args = self._args
-            result._stdin = self._stdin
-            result._env = {**(self._env or {}), **env}
-            result._cwd = self._cwd
-            result._shell = self._shell
+            result._args = self._pipeline[-1]._args
+            result._stdin = self._pipeline[-1]._stdin
+            result._env = {**(self._pipeline[-1]._env or {}), **env}
+            result._cwd = self._pipeline[-1]._cwd
+            result._shell = self._pipeline[-1]._shell
 
-            result._pipeline = []
-            for c in self._pipeline:
-                merged = {**(c._env or {}), **env}
-                new_c = Cmd(*c._args, stdin=c._stdin, env=merged, cwd=c._cwd, shell=c._shell)
-                new_c._pipeline = [new_c]
-                result._pipeline.append(new_c)
+            result._pipeline = [
+                Cmd(*c._args, stdin=c._stdin, env={**(c._env or {}), **env}, cwd=c._cwd, shell=c._shell)
+                for c in self._pipeline
+            ]
             return result
 
     def with_cwd(self, cwd: str) -> "Cmd":
         """Return a new Cmd/pipeline with a different working directory for ALL commands."""
         if len(self._pipeline) == 1:
-            new_cmd = Cmd(*self._args, stdin=self._stdin, env=self._env, cwd=cwd, shell=self._shell)
-            new_cmd._pipeline = [new_cmd]
-            return new_cmd
+            return Cmd(*self._args, stdin=self._stdin, env=self._env, cwd=cwd, shell=self._shell)
         else:
             # Pipeline - apply cwd to ALL commands
             result = Cmd.__new__(Cmd)
-            result._args = self._args
-            result._stdin = self._stdin
-            result._env = self._env
+            result._args = self._pipeline[-1]._args
+            result._stdin = self._pipeline[-1]._stdin
+            result._env = self._pipeline[-1]._env
             result._cwd = cwd
-            result._shell = self._shell
+            result._shell = self._pipeline[-1]._shell
 
-            result._pipeline = []
-            for c in self._pipeline:
-                new_c = Cmd(*c._args, stdin=c._stdin, env=c._env, cwd=cwd, shell=c._shell)
-                new_c._pipeline = [new_c]
-                result._pipeline.append(new_c)
+            result._pipeline = [
+                Cmd(*c._args, stdin=c._stdin, env=c._env, cwd=cwd, shell=c._shell)
+                for c in self._pipeline
+            ]
             return result
 
-    def _start_pipeline(self) -> tuple[list[subprocess.Popen], Optional[threading.Thread]]:
-        """Start all processes in pipeline, return handles."""
+    def _start_pipeline(self, text: bool = False) -> tuple[list[subprocess.Popen], Optional[threading.Thread]]:
+        """Start all processes in pipeline, return handles.
+
+        Args:
+            text: If True, use text mode (str) for stdin/stdout/stderr.
+                  If False (default), use binary mode (bytes).
+        """
         import os
 
         processes: list[subprocess.Popen] = []
@@ -648,14 +549,29 @@ class Cmd:
 
             env = {**os.environ, **(pipe_cmd._env or {})} if pipe_cmd._env else None
 
-            proc = subprocess.Popen(
-                pipe_cmd._args,
-                stdin=stdin_source,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE if is_last else subprocess.DEVNULL,
-                env=env,
-                cwd=pipe_cmd._cwd,
-            )
+            # Handle shell mode
+            if pipe_cmd._shell:
+                command = pipe_cmd._args[0] if len(pipe_cmd._args) == 1 else shlex.join(pipe_cmd._args)
+                proc = subprocess.Popen(
+                    command,
+                    shell=True,
+                    stdin=stdin_source,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE if is_last else subprocess.DEVNULL,
+                    text=text,
+                    env=env,
+                    cwd=pipe_cmd._cwd,
+                )
+            else:
+                proc = subprocess.Popen(
+                    pipe_cmd._args,
+                    stdin=stdin_source,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE if is_last else subprocess.DEVNULL,
+                    text=text,
+                    env=env,
+                    cwd=pipe_cmd._cwd,
+                )
             processes.append(proc)
 
             if not is_first and processes[-2].stdout:
@@ -667,9 +583,13 @@ class Cmd:
             def feed_stdin():
                 try:
                     data = self._pipeline[0]._stdin
-                    if isinstance(data, str):
-                        data = data.encode()
-                    processes[0].stdin.write(data)
+                    # In text mode, write as string; in binary mode, encode
+                    if text:
+                        processes[0].stdin.write(data)
+                    else:
+                        if isinstance(data, str):
+                            data = data.encode()
+                        processes[0].stdin.write(data)
                     processes[0].stdin.close()
                 except BrokenPipeError:
                     pass
@@ -701,15 +621,12 @@ class Cmd:
         processes, stdin_thread = self._start_pipeline()
         return Stream(processes=processes, stdin_thread=stdin_thread)
 
-    async def stream_async(self) -> "AsyncStream":
-        """
-        Start the command/pipeline and return an AsyncStream for incremental reading.
-
-        The command starts immediately. Use the AsyncStream's iteration methods
-        to read output as it becomes available.
+    async def _start_pipeline_async(self) -> tuple[list, list]:
+        """Start all async processes in pipeline, return handles and shuttle tasks.
 
         Returns:
-            AsyncStream object for reading output.
+            Tuple of (processes, shuttle_tasks) where shuttle_tasks handle
+            stdin feeding and inter-process data piping.
         """
         import os
 
@@ -724,22 +641,33 @@ class Cmd:
             if is_first:
                 stdin = asyncio.subprocess.PIPE if pipe_cmd._stdin else None
             else:
-                stdin = asyncio.subprocess.PIPE
+                stdin = asyncio.subprocess.PIPE  # We'll feed it manually
 
-            proc = await asyncio.create_subprocess_exec(
-                *pipe_cmd._args,
-                stdin=stdin,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE if is_last else asyncio.subprocess.DEVNULL,
-                env=env,
-                cwd=pipe_cmd._cwd,
-            )
+            # Handle shell mode
+            if pipe_cmd._shell:
+                command = pipe_cmd._args[0] if len(pipe_cmd._args) == 1 else shlex.join(pipe_cmd._args)
+                proc = await asyncio.create_subprocess_shell(
+                    command,
+                    stdin=stdin,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE if is_last else asyncio.subprocess.DEVNULL,
+                    env=env,
+                    cwd=pipe_cmd._cwd,
+                )
+            else:
+                proc = await asyncio.create_subprocess_exec(
+                    *pipe_cmd._args,
+                    stdin=stdin,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE if is_last else asyncio.subprocess.DEVNULL,
+                    env=env,
+                    cwd=pipe_cmd._cwd,
+                )
             processes.append(proc)
 
-        # Set up data flow tasks for piping between processes
-        shuttle_tasks = []
-
+        # Helper to shuttle data between processes
         async def pipe_data(src: asyncio.StreamReader, dst: asyncio.StreamWriter):
+            """Copy data from src to dst until EOF."""
             try:
                 while True:
                     chunk = await src.read(8192)
@@ -748,13 +676,16 @@ class Cmd:
                     dst.write(chunk)
                     await dst.drain()
             except (BrokenPipeError, ConnectionResetError, OSError):
-                pass
+                pass  # Downstream closed, that's fine
             finally:
                 try:
                     dst.close()
                     await dst.wait_closed()
                 except Exception:
-                    pass
+                    pass  # Best effort cleanup
+
+        # Set up data flow tasks
+        shuttle_tasks = []
 
         # Feed initial stdin
         if self._pipeline[0]._stdin:
@@ -780,6 +711,19 @@ class Cmd:
                 pipe_data(processes[i].stdout, processes[i + 1].stdin)
             ))
 
+        return processes, shuttle_tasks
+
+    async def stream_async(self) -> "AsyncStream":
+        """
+        Start the command/pipeline and return an AsyncStream for incremental reading.
+
+        The command starts immediately. Use the AsyncStream's iteration methods
+        to read output as it becomes available.
+
+        Returns:
+            AsyncStream object for reading output.
+        """
+        processes, shuttle_tasks = await self._start_pipeline_async()
         return AsyncStream(processes=processes, shuttle_tasks=shuttle_tasks)
 
     def __repr__(self) -> str:
