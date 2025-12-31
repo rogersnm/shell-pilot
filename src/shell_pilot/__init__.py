@@ -33,7 +33,7 @@ import threading
 from dataclasses import dataclass
 from typing import Union, Optional, Iterator, AsyncIterator, IO
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 __all__ = [
     "Cmd",
